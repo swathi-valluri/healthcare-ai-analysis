@@ -1,0 +1,4 @@
+age,race,readmission,time_in_hospital,admission_type
+45,White,1,5,Emergency
+60,Black,0,3,Routine
+70,Asian,1,7,Elective
