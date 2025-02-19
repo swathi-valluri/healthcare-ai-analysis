@@ -1,42 +1,34 @@
-import pickle
+import joblib
 import pandas as pd
-import uvicorn
+import logging
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import os
-import numpy as np
-import lightgbm as lgb
+from fastapi.middleware.cors import CORSMiddleware
 
-## Ensure model directory exists
-os.makedirs("models", exist_ok=True)
+# Setup logging
+logging.basicConfig(level=logging.INFO)
 
-# Load trained LightGBM model with error handling
+app = FastAPI()
+
+# Allow CORS for local testing
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Load Model
 model_path = "models/lightgbm_model.pkl"
-scaler_path = "models/scaler.pkl"
-
-model, scaler = None, None  # Initialize to None
-
 try:
-    if os.path.exists(model_path):
-        with open(model_path, "rb") as f:
-            model = pickle.load(f)
-    else:
-        raise FileNotFoundError("❌ LightGBM model not found! Please train and save it first.")
-
-    if os.path.exists(scaler_path):
-        with open(scaler_path, "rb") as f:
-            scaler = pickle.load(f)
-    else:
-        print("⚠️ Warning: Scaler file not found! Continuing without scaling.")
+    model = joblib.load(model_path)
+    logging.info(f"✅ Model loaded from {model_path}")
 except Exception as e:
-    print(f"🚨 Model loading error: {e}")
+    logging.error(f"❌ Failed to load model: {e}")
+    model = None
 
-# Initialize FastAPI app
-app = FastAPI(title="Healthcare Readmission Prediction API",
-              description="API for predicting patient readmission risk using LightGBM",
-              version="1.0")
-
-# Define request format using Pydantic
+# Define Input Schema
 class PatientData(BaseModel):
     race: int
     gender: int
@@ -52,6 +44,15 @@ class PatientData(BaseModel):
     number_emergency: int
     number_inpatient: int
     number_diagnoses: int
+    total_visits: int
+    comorbidity_score: int
+    change: int
+    diabetesMed: int
+    diag_1: str
+    diag_2: str
+    diag_3: str
+    max_glu_serum: str
+    A1Cresult: str
     metformin: int
     repaglinide: int
     nateglinide: int
@@ -75,50 +76,42 @@ class PatientData(BaseModel):
     glimepiride_pioglitazone: int
     metformin_rosiglitazone: int
     metformin_pioglitazone: int
-    change: int
-    diabetesMed: int
-    total_visits: int
-    comorbidity_score: int
 
-# Health check endpoint
-@app.get("/health")
-def health_check():
-    return {"status": "API is running"}
-
-# Prediction endpoint
 @app.post("/predict")
-def predict_readmission(data: PatientData):
-    print("🚀 Incoming API Request Data:", data.dict())  # Debug print
-    # Ensure the model is loaded
+async def predict(data: PatientData):
     if model is None:
         raise HTTPException(status_code=500, detail="Model not loaded")
 
-    # Convert data to model input
     try:
-        input_data = np.array([list(data.dict().values())])  # Convert to NumPy array
-        print("📊 Processed Input Data for Model:", input_data)  # Debug print
+        # Convert input to DataFrame
+        input_df = pd.DataFrame([data.dict()])
 
-        # Ensure the model supports `predict_proba`
-        if hasattr(model, "predict_proba"):
-            prediction_prob = model.predict_proba(input_data)[:, 1]  # Probability of readmission
-        else:
-            prediction_prob = model.predict(input_data)  # Use `predict()` if `predict_proba` is unavailable
+        # Log input before transformation
+        logging.info(f"📊 Raw Input Features: {input_df.dtypes}")
 
-        print("🔍 Model Prediction Probability:", prediction_prob)  # Debug print
+        # ✅ Step 1: Encode `diag_1`, `diag_2`, `diag_3` (Convert to category codes)
+        for col in ["diag_1", "diag_2", "diag_3"]:
+            input_df[col] = pd.factorize(input_df[col])[0]  # Assign unique integer codes
+        
+        # ✅ Step 2: Encode `max_glu_serum` and `A1Cresult` (Map to numeric)
+        glu_mapping = {"None": 0, "Norm": 1, ">200": 2, ">300": 3}
+        a1c_mapping = {"None": 0, "Norm": 1, ">7": 2, ">8": 3}
 
-        # Convert probability to label
-        prediction_label = "Yes" if prediction_prob[0] > 0.5 else "No"
+        input_df["max_glu_serum"] = input_df["max_glu_serum"].map(glu_mapping).fillna(0).astype(int)
+        input_df["A1Cresult"] = input_df["A1Cresult"].map(a1c_mapping).fillna(0).astype(int)
 
-        # Return response
-        return {
-            "readmission_probability": round(float(prediction_prob[0]), 4),
-            "readmission_prediction": prediction_label
-        }
+        # Log transformed input data
+        logging.info(f"📊 Processed Input Features: {input_df.dtypes}")
+
+        # ✅ Step 3: Ensure all numeric fields are cast properly
+        input_df = input_df.apply(pd.to_numeric, errors="coerce")
+
+        # Make prediction
+        prediction = model.predict(input_df)[0]
+        probability = model.predict_proba(input_df)[0][1]
+
+        return {"readmission": int(prediction), "probability": round(probability * 100, 2)}
 
     except Exception as e:
-        print(f"🚨 Prediction error: {e}")
-        raise HTTPException(status_code=500, detail="Prediction failed. Check model compatibility.")
-
-# Run FastAPI server
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+        logging.error(f"🚨 Prediction Error: {e}")
+        raise HTTPException(status_code=500, detail=f"Prediction failed: {e}")

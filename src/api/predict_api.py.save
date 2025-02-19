@@ -1,0 +1,139 @@
+import os
+import csv
+import joblib
+import numpy as np
+import pandas as pd
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from datetime import datetime
+
+# Load the trained model and preprocessing objects
+MODEL_PATH = "models/lightgbm_model.pkl"
+SCALER_PATH = "models/scaler.pkl"
+ENCODER_PATH = "models/encoder.pkl"
+DATA_FILE = "data/predictions.csv"
+
+# Ensure data directory exists
+os.makedirs("data", exist_ok=True)
+
+try:
+    model = joblib.load(MODEL_PATH)
+    scaler = joblib.load(SCALER_PATH)
+    encoder = joblib.load(ENCODER_PATH)
+except Exception as e:
+    raise RuntimeError(f"Error loading model or preprocessing files: {e}")
+
+# Define request model
+class PatientData(BaseModel):
+    race: int
+    gender: int
+    age: int
+    admission_type_id: int
+    discharge_disposition_id: int
+    admission_source_id: int
+    time_in_hospital: int
+    num_lab_procedures: int
+    num_procedures: int
+    num_medications: int
+    number_outpatient: int
+    number_emergency: int
+    number_inpatient: int
+    number_diagnoses: int
+    total_visits: int
+    comorbidity_score: int
+    max_glu_serum: str  # ✅ ADDED
+    A1Cresult: str  # ✅ ADDED
+    change: int
+    diabetesMed: int
+    metformin: int
+    repaglinide: int
+    nateglinide: int
+    chlorpropamide: int
+    glimepiride: int
+    acetohexamide: int
+    glipizide: int
+    glyburide: int
+    tolbutamide: int
+    pioglitazone: int
+    rosiglitazone: int
+    acarbose: int
+    miglitol: int
+    troglitazone: int
+    tolazamide: int
+    examide: int
+    citoglipton: int
+    insulin: int
+    glyburide_metformin: int
+    glipizide_metformin: int
+    glimepiride_pioglitazone: int
+    metformin_rosiglitazone: int
+    metnt
+
+
+app = FastAPI()
+
+def preprocess_input(data: PatientData):
+    """Preprocess input data to match the training pipeline."""
+    input_dict = data.dict()
+    input_df = pd.DataFrame([input_dict])
+    
+    # Log input dataframe columns before preprocessing
+    logging.info(f"Columns before preprocessing: {input_df.columns.tolist()}")
+
+    # One-hot encode categorical features
+    categorical_features = ["race", "gender", "admission_type_id", "discharge_disposition_id", "admission_source_id"]
+    encoded_data = encoder.transform(input_df[categorical_features]).toarray()
+    encoded_df = pd.DataFrame(encoded_data, columns=encoder.get_feature_names_out(categorical_features))
+    
+    input_df = input_df.drop(categorical_features, axis=1)
+    input_df = pd.concat([input_df, encoded_df], axis=1)
+
+    # Log columns after encoding
+    logging.info(f"Columns after encoding: {input_df.columns.tolist()}")
+
+    # Ensure all expected columns exist
+    expected_cols = scaler.feature_names_in_
+    for col in expected_cols:
+        if col not in input_d
+
+import logging
+logging.basicConfig(level=logging.INFO)
+
+@app.post("/predict")
+def predict(data: PatientData):
+    try:
+        logging.info(f"Raw Input Data: {data.dict()}")  # Log raw input
+        input_processed = preprocess_input(data)
+        logging.info(f"Processed Input Shape: {input_processed.shape}")  # Log processed shape
+        prediction_prob = model.predict_proba(input_processed)[:, 1][0]
+        prediction_label = "Yes" if prediction_prob > 0.5 else "No"
+        log_prediction(data, prediction_prob, prediction_label)
+        return {
+            "readmission_probability": round(prediction_prob, 4),
+            "readmission_prediction": prediction_label
+        }
+    except Exception as e:
+        logging.error(f"Prediction Error: {e}")
+        raise HTTPException(status_code=500, detail=f"Prediction failed: {e}")
+
+
+def log_prediction(data, probability, prediction):
+    """Logs the prediction into a CSV file."""
+    file_exists = os.path.isfile(DATA_FILE)
+    with open(DATA_FILE, mode="a", newline="") as file:
+        writer = csv.writer(file)
+        if not file_exists:
+            writer.writerow([
+                "timestamp", "race", "gender", "age", "admission_type_id", "discharge_disposition_id", "admission_source_id", 
+                "time_in_hospital", "num_lab_procedures", "num_procedures", "num_medications", "number_outpatient", "number_emergency", 
+                "number_inpatient", "number_diagnoses", "total_visits", "comorbidity_score", "change", "diabetesMed", 
+                "readmission_probability", "readmission_prediction"
+            ])
+        writer.writerow([
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"), data.race, data.gender, data.age, 
+            data.admission_type_id, data.discharge_disposition_id, data.admission_source_id, 
+            data.time_in_hospital, data.num_lab_procedures, data.num_procedures, data.num_medications,
+            data.number_outpatient, data.number_emergency, data.number_inpatient, data.number_diagnoses,
+            data.total_visits, data.comorbidity_score, data.change, data.diabetesMed,
+            round(probability, 4), prediction
+        ])
